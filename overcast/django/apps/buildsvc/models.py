@@ -5,6 +5,7 @@ import os.path
 import shutil
 import subprocess
 import tempfile
+from urlparse import urlparse
 
 from django.conf import settings
 from django.db import models
@@ -14,7 +15,7 @@ from django.template.loader import render_to_string
 
 import deb822
 
-from utils import run_cmd, recursive_render
+from ...utils import run_cmd, recursive_render
 
 import tasks
 
@@ -44,7 +45,7 @@ class Repository(models.Model):
     name = models.CharField(max_length=100)
     key_id = models.CharField(max_length=100)
     extra_admins = models.ManyToManyField(auth_models.Group)
-    
+
     class Meta:
         verbose_name_plural = 'repositories'
 
@@ -76,7 +77,7 @@ class Repository(models.Model):
                     self.save()
 
     def first_series(self):
-        return self.series.all()[0:1].get()
+        return Series.objects.get_or_create(name=settings.BUILDSVC_DEFAULT_SERIES_NAME, repository=self)[0]
 
     @property
     def basedir(self):
@@ -102,17 +103,25 @@ class Repository(models.Model):
         recursive_render(os.path.join(os.path.dirname(__file__),
                                       'templates/buildsvc/reprepro'),
                          self.basedir, {'repository': self})
-        
+
     def _reprepro(self, *args):
         env = {'GNUPG_HOME': self.gpghome()}
         return run_cmd(['reprepro', '-b', self.basedir] + list(args),
                        override_env=env)
 
+    def export_key(self):
+        keypath = os.path.join(self.outdir(), 'repo.key')
+        if not os.path.exists(keypath):
+            output = run_cmd(['gpg', '-a', '--export', self.key_id])
+            with open(keypath, 'w') as fp:
+                fp.write(output)
+
     def export(self):
         self.ensure_key()
         self.ensure_directory_structure()
+        self.export_key()
         self._reprepro('export')
-        
+
     def process_changes(self, series_name, changes_file):
         self.ensure_directory_structure()
         remove_ddebs_from_changes(changes_file)
@@ -139,7 +148,7 @@ class Repository(models.Model):
 class Series(models.Model):
     name = models.CharField(max_length=100)
     repository = models.ForeignKey(Repository, related_name='series')
-    
+
     def __unicode__(self):
         return '%s/%s' % (self.repository.name, self.name)
 
@@ -161,7 +170,7 @@ class Series(models.Model):
 
     class Meta:
         verbose_name_plural = 'series'
-    
+
     def process_changes(self, changes_file):
         self.repository.process_changes(self.name, changes_file)
 
@@ -172,8 +181,23 @@ class Series(models.Model):
         return self.repository.user_can_modify(user)
 
 
+class ExternalDependency(models.Model):
+    url = models.URLField()
+    series = models.CharField(max_length=200)
+    components = models.CharField(max_length=200, null=True, blank=True)
+    own_series = models.ForeignKey(Series)
+    key = models.TextField()
+
+    @property
+    def deb_line(self):
+        return 'deb %s %s %s' % (self.url, self.series, self.components)
+
+    def user_can_modify(self, user):
+        return self.own_series.user_can_modify(user)
+
+
 class PackageSource(models.Model):
-    github_repository = models.ForeignKey("GithubRepository")
+    git_url = models.URLField()
     branch = models.CharField(max_length=100)
     series = models.ForeignKey(Series, related_name='sources')
     last_seen_revision = models.CharField(max_length=64, null=True, blank=True)
@@ -181,10 +205,10 @@ class PackageSource(models.Model):
     build_counter = models.IntegerField(default=0)
 
     def __unicode__(self):
-        return '%s/%s' % (self.github_repository, self.branch)
+        return '%s/%s' % (self.git_url, self.branch)
 
     def poll(self):
-        cmd = ['git', 'ls-remote', self.github_repository.url,
+        cmd = ['git', 'ls-remote', self.git_url,
                'refs/heads/%s' % self.branch]
         stdout = run_cmd(cmd)
         sha = stdout.split('\t')[0]
@@ -201,7 +225,7 @@ class PackageSource(models.Model):
         builddir = os.path.join(tmpdir, 'build')
         try:
             run_cmd(['git',
-                     'clone', self.github_repository.url,
+                     'clone', self.git_url,
                      '-b', self.branch,
                      'build'],
                     cwd=tmpdir, logger=logger)
@@ -217,13 +241,12 @@ class PackageSource(models.Model):
 
     @property
     def long_name(self):
-        return '%s_%s' % (self.github_repository.repo_owner,
-                          self.github_repository.repo_name)
+        return '_'.join(filter(bool, urlparse(self.git_url).path.split('/')))
 
     @property
     def name(self):
-        return self.github_repository.repo_name.replace('_', '-')
-        
+        return self.git_url.split('/')[-1].replace('_', '-')
+
     def build(self):
         tasks.build.delay(self.id)
 
@@ -240,7 +263,7 @@ class PackageSource(models.Model):
             import pkgbuild
             builder_cls = pkgbuild.choose_builder(self.builddir)
             builder = builder_cls(tmpdir, self, br)
-            
+
             builder.build()
 
             changes_files = filter(lambda s:s.endswith('.changes'), os.listdir(tmpdir))
@@ -253,7 +276,7 @@ class PackageSource(models.Model):
             shutil.rmtree(tmpdir)
 
     def user_can_modify(self, user):
-        return self.repository.user_can_modify(user)
+        return self.series.user_can_modify(user)
 
 
 class BuildRecord(models.Model):
@@ -348,4 +371,4 @@ class GithubRepository(models.Model):
 class PackageSourceForm(ModelForm):
     class Meta:
         model = PackageSource
-        fields = ['github_repository', 'branch', 'series']
+        fields = ['git_url', 'branch', 'series']

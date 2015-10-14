@@ -17,7 +17,14 @@
 from setuptools import setup, find_packages
 
 with open('requirements.txt', 'r') as fp:
-    requirements = [x.strip() for x in fp]
+    requirements = []
+    for l in fp:
+         l = l.strip()
+         if '://' in l:
+             l = l.split('/')[-1]
+             if '#egg=' in l:
+                 l = l.split('#egg=')[-1]
+         requirements.append(l)
 
 setup(
     name='overcast.django',

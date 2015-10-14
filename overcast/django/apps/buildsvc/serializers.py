@@ -8,37 +8,78 @@ from . import models
 class UserSerializer(serializers.HyperlinkedModelSerializer):
     class Meta:
         model = User
-        fields = ('url', 'username', 'email', 'groups')
+        fields = ('self', 'username', 'email', 'groups')
 
 
 class GroupSerializer(serializers.HyperlinkedModelSerializer):
     class Meta:
         model = Group
-        fields = ('url', 'name')
+        fields = ('self', 'name')
+
+class RepositoryField(serializers.HyperlinkedRelatedField):
+    def get_queryset(self):
+        if hasattr(self, 'context') and 'request' in self.context:
+            return models.Repository.lookup_by_user(self.context['request'].user)
+
+        return super(RepositoryField, self).get_queryset()
 
 
 class PackageSourceSerializer(serializers.HyperlinkedModelSerializer):
-    git_repository = serializers.ReadOnlyField(source='github_repository.url')
-    git_branch = serializers.ReadOnlyField(source='branch')
-    repository = serializers.HyperlinkedRelatedField(view_name='repository-detail', source='series.repository', read_only=True)
+    git_repository = serializers.URLField(source='git_url', required=True)
+    git_branch = serializers.SlugField(source='branch', required=True)
+    repository = RepositoryField(view_name='repository-detail', source='series.repository', queryset=models.Repository.objects.all())
+    builds = serializers.HyperlinkedIdentityField(view_name='build-list', lookup_url_kwarg='source_pk', lookup_field='pk', read_only=True)
 
     class Meta:
         model = models.PackageSource
-        fields = ('url', 'git_repository', 'git_branch', 'repository')
+        fields = ('self', 'git_repository', 'git_branch', 'repository', 'builds')
+
+    def validate_repository(self, value):
+        return value.first_series()
+
+    def validate(self, data):
+        res = super(PackageSourceSerializer, self).validate(data)
+        res['series'] = res['series']['repository']
+        return res
 
 
 class SeriesSerializer(serializers.HyperlinkedModelSerializer):
     class Meta:
         model = models.Series
-        fields = ('url', 'name', 'repository', 'binary_source_list', 'source_source_list')
+        fields = ('self', 'name', 'repository', 'binary_source_list', 'source_source_list')
+
+
+class BuildRecordSerializer(serializers.HyperlinkedModelSerializer):
+    class Meta:
+        model = models.BuildRecord
+        fields = ('self', 'source', 'version', 'build_started', 'sha', 'buildlog_url')
+
+
+class ExternalDependencySerializer(serializers.HyperlinkedModelSerializer):
+    repository = RepositoryField(view_name='repository-detail', source='own_series.repository', queryset=models.Repository.objects.all())
+
+    class Meta:
+        model = models.ExternalDependency
+        fields = ('self', 'url', 'series', 'components', 'repository', 'key')
+
+    def validate_repository(self, value):
+        return value.first_series()
+
+    def validate(self, data):
+        res = super(ExternalDependencySerializer, self).validate(data)
+        if 'own_series' in res:
+            res['own_series'] = res['own_series']['repository']
+        return res
 
 
 class RepositorySerializer(serializers.HyperlinkedModelSerializer):
     user = serializers.ReadOnlyField(source='user.username')
+    key_id = serializers.CharField(read_only=True)
     binary_source_list = serializers.ReadOnlyField(source='first_series.binary_source_list')
     source_source_list = serializers.ReadOnlyField(source='first_series.source_source_list')
     sources = serializers.HyperlinkedIdentityField(view_name='packagesource-list', lookup_url_kwarg='repository_pk', lookup_field='pk', read_only=True)
+    external_dependencies = serializers.HyperlinkedIdentityField(view_name='externaldependency-list', lookup_url_kwarg='repository_pk', lookup_field='pk', read_only=True)
 
     class Meta:
         model = models.Repository
-        fields = ('url', 'user', 'name', 'key_id', 'sources', 'binary_source_list', 'source_source_list') # 'series', 
+        fields = ('self', 'user', 'name', 'key_id', 'sources', 'binary_source_list', 'source_source_list', 'external_dependencies')
