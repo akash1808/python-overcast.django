@@ -5,7 +5,7 @@ import os.path
 from django.contrib.auth import models as auth_models
 from django.test import TestCase, override_settings
 
-from .models import Repository, Series
+from .models import Repository, Series, PackageSource
 
 class RepositoryTestCase(TestCase):
     fixtures = ['data.json']
@@ -114,11 +114,13 @@ class RepositoryTestCase(TestCase):
         repo = Repository.objects.get(id=2)
         with mock.patch.multiple(repo, ensure_key=mock.DEFAULT,
                                        ensure_directory_structure=mock.DEFAULT,
+                                       export_key=mock.DEFAULT,
                                        _reprepro=mock.DEFAULT) as mocks:
             repo.export()
 
             mocks['ensure_key'].ensure_called_with()
             mocks['ensure_directory_structure'].ensure_called_with()
+            mocks['export_key'].ensure_called_with()
             mocks['_reprepro'].ensure_called_with('export')
 
     @mock.patch('overcast.django.apps.buildsvc.models.remove_ddebs_from_changes')
@@ -147,3 +149,15 @@ class RepositoryTestCase(TestCase):
         repo = Repository.objects.get(id=2)
         self.assertEquals(repo.base_url, 'http://example.com/some/dir/sorenh/other')
 
+
+class PackageSourceTestCase(TestCase):
+    fixtures = ['data.json']
+
+    @mock.patch('overcast.django.apps.buildsvc.tasks.reprepro')
+    def test_post_delete(self, reprepro):
+        ps = PackageSource.objects.create(series_id=1,
+                                          git_url='https://example.com/git',
+                                          branch='master',
+                                          last_built_name='something')
+        ps.delete()
+        reprepro.delay.assert_called_with(1, 'removesrc', 'overcast', 'something')
